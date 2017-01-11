@@ -1,6 +1,9 @@
 {
-    "files": [
-        "src/*.ts"
+    "include": [
+        "src/**/*"
+    ],
+    "exclude": [
+        "node_modules"
     ],
     "compilerOptions": {
         "lib":[
