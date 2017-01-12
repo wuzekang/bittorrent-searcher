@@ -9,7 +9,10 @@ import * as Protocol from 'bittorrent-protocol';
 import * as ut_metadata from 'ut_metadata';
 import * as parseTorrent from 'parse-torrent';
 
-interface Message {
+import Queue from './priority-queue';
+//90289fd34dfc1cf8f316a268add8354c85334458
+
+export interface Message {
     t: Buffer,
     y: String,
     q: String,
@@ -28,11 +31,23 @@ export interface Node extends Peer {
     token?: string
 }
 
+export interface Query {
+    method: string,
+    data: any,
+    peer: Peer,
+    response: Function,
+    timer?: NodeJS.Timer
+}
+
+export enum Priority {
+    High, Medium, Low
+}
+
 export class KRPC extends EventEmitter {
     concurrency = 100;
 
     _running = new Map();
-    _pending = new Array();
+    _pending = new Queue<Priority, Query>();
     
     _tick = 0;
 
@@ -41,17 +56,14 @@ export class KRPC extends EventEmitter {
     constructor() {
         super();
         this._socket.on('message', (data, rinfo) => {
-            let message: Message = bencode.decode(data),
-                type = message.y.toString();
-            if (type == 'r' || type == 'e') {
-                try {
+            try {
+                let message: Message = bencode.decode(data),
+                    type = message.y.toString();
+                if (type == 'r' || type == 'e') {
                     let tid = message.t.readUInt16BE(0),
                         query = this._running.get(tid);
                     if (query) query.response(message[type], rinfo);
-                } catch (error) {
-                }
-            } else if (type == 'q') {
-                try {
+                } else if (type == 'q') {
                     let tid = message.t.readUInt16BE(0),
                         query : any = {
                             method: message.q.toString(),
@@ -61,36 +73,48 @@ export class KRPC extends EventEmitter {
                         };
                         
                     this.emit('query', query);
-                } catch (error) {
                 }
+            } catch (error) {
+                
             }
-        });
+        })
+
+        this._socket.on('error', err => {
+
+        })
     }
 
     _response(message, rinfo) {
         let _message = message;
-        return data => {
-            Promise.resolve(data).then(data => {
-                let message = {
-                    t: _message.t,
-                    y: 'r',
-                    r: data
-                }
-                this._socket.send(bencode.encode(message), rinfo.port, rinfo.address);
-            })
+        return async data =>  {
+            data = await data;
+            let message = {
+                t: _message.t,
+                y: 'r',
+                r: data
+            }
+            this._socket.send(bencode.encode(message), rinfo.port, rinfo.address);
         }
     }
 
     _runQueries() {
         
-        while(this._pending.length &&  this._running.size < this.concurrency) {
-            let query = this._pending.shift();
+        while(this._pending.size &&  this._running.size < this.concurrency) {
+            let query = this._pending.pop();
 
-            let {message, peer, response} = query;
+            let {method, data, peer, response} = query;
 
             let tid = this._tick ++;
             
             if (tid >= 0xFFFF) this._tick = 0;
+
+            let message: Message = {
+                t: new Buffer(2),
+                y: 'q',
+                q: method,
+            };
+
+            if (data) message.a = data;
 
             message.t.writeUInt16BE(tid, 0);
             
@@ -110,15 +134,7 @@ export class KRPC extends EventEmitter {
         }
     }
 
-    query(peer: Peer, method, data?: Object) {
-
-        let message: Message = {
-            t: new Buffer(2),
-            y: 'q',
-            q: method,
-        };
-
-        if (data) message.a = data;
+    query(peer: Peer, method, data = null, priority = Priority.Medium) {
 
         return new Promise((resolve, reject) => {
 
@@ -133,7 +149,8 @@ export class KRPC extends EventEmitter {
                 resolve(data);
             };
 
-            this._pending.push({message: message, peer: peer, response: response});
+
+            this._pending.push({method: method, data: data, peer: peer, response: response}, priority);
             this._runQueries();
 
         })
@@ -144,7 +161,7 @@ export class KRPC extends EventEmitter {
 
 export class DHT extends EventEmitter {
 
-    id = Buffer.from('90289fd34dfc1cf8f316a268add8354c85334458', 'hex');
+    id = randomBytes(20);
     K = 20;
 
     static BOOTSTRAP_NODES: Array<Peer> = [
@@ -154,14 +171,11 @@ export class DHT extends EventEmitter {
     ]
 
     _krpc = new KRPC();
-    
-    _tables = [];
-    
-    
+    _table = new KBucket({ localNodeId: this.id });
 
     constructor() {
         super();
-        this._krpc.on('query', query => {
+        this._krpc.on('query', async query => {
             let {peer, method, data, response} = query;
             let id = this._closestID(data);
 
@@ -177,11 +191,16 @@ export class DHT extends EventEmitter {
                     break;
                 case 'announce_peer':
                     response({ id: id });
-                    console.log(data);
+                    let {port, implied_port, info_hash} = data;
+                    peer.port = !implied_port && port > 0 && port < 0xFFFF ? port : peer.port;
+                    let metadata = await this.metadata(info_hash, [peer]);
+                    this.emit('metadata', info_hash.toString('hex'), metadata, peer);
                     break;
                 default:
                     break;
             }
+
+            
         })
     }
 
@@ -198,9 +217,12 @@ export class DHT extends EventEmitter {
         }
         return this.id;
     }
+    
+    listen(port?:number, address?:string, callback?: () => void) : void {
+        this._krpc._socket.bind(port, address, callback);
+    }
 
     lookup(target, table = new KBucket({localNodeId: target})) {
-        console.log('DHT.lookup');
         table.removeAllListeners('ping');
         table.on('ping', (oldNodes, newNode) => {
             oldNodes.forEach(node => table.remove(node.id));
@@ -219,28 +241,27 @@ export class DHT extends EventEmitter {
         }
 
         return new Promise((resolve) => {
-            const next = () => {
-                queries().then((results: any) => {
-                    let peers = [];
-                    results.filter(result => result).forEach(result => {
-                        let {nodes, values} = result;
-                        if (nodes) nodes.forEach(node => table.add(node));                
-                        if (values) peers = peers.concat(values);
-                    })
-                    if (peers.length == 0) {
-                        next();
-                    } else {
-                        resolve(peers);
-                    }
+            const next = async () => {
+                let results : any  = await queries(),
+                    peers = [];
+                results.filter(result => result).forEach(result => {
+                    let {nodes, values} = result;
+                    if (nodes) nodes.forEach(node => table.add(node));                
+                    if (values) peers = peers.concat(values);
                 })
+                if (peers.length == 0) {
+                    next();
+                } else {
+                    resolve(peers);
+                }
             };
             next();
         })
     }
 
     metadata(target, peers = null) {
-        console.log('DHT.metadata');
         let table = new KBucket({localNodeId: target});
+        let retries = 8;
 
         const fetch = (peers) => {
             let promises = peers.map(peer => {
@@ -278,15 +299,19 @@ export class DHT extends EventEmitter {
         }
 
         return new Promise((resolve) => {
-            let next = () => {
-                Promise.resolve(peers || this.lookup(target, table)).then((_peers) => {
-                    console.log(_peers.length);
-                    peers = null;
-                    fetch(_peers).then((metadata) => {
-                        if (metadata) resolve(metadata);
-                        else next();
-                    })
-                })
+            let next = async () => {
+                if (-- retries < 0) {
+                    resolve(null);
+                } else {
+                    let _peers = peers || await this.lookup(target, table),
+                        metadata = await fetch(_peers);
+                    if (metadata) {
+                        resolve(metadata);
+                    } else {
+                        peers = null;
+                        next();
+                    }
+                }
             }
             next();
         })
@@ -297,13 +322,15 @@ export class DHT extends EventEmitter {
         let running = 0, cache = [];
 
         const query = (node) => {
+            
             if (node && cache.length < concurrency) cache.push(node);
 
-            if (running < concurrency) {
+            if (cache.length && running < concurrency) {
                 ++ running;
                 let node = cache.shift(),
                     id = this._closestID(node);
-                this._krpc.query(node, 'find_node', {id: id, target: randomBytes(20)}).then(next);
+                
+                this._krpc.query(node, 'find_node', {id: id, target: randomBytes(20)}, Priority.Low).then(next);
             }
 
         }
@@ -323,47 +350,7 @@ export class DHT extends EventEmitter {
 
     }
 
-    createRouter(target) {
-        let table = new KBucket({localNodeId: target}),
-            method = 'find_node',
-            args = {id: target, target: target};
-        
-        this._tables.push(table);
-
-        const queries = (peers) => {
-            return Promise.all(peers.map((peer) => {
-                return this._krpc.query(peer, method, args);
-            }));
-        }
-
-        return new Promise((resolve) => {
-            const next = (results: any) => {
-                let count = table.count();
-                results.filter(result => result).forEach(result => {
-                    let {nodes} = result;
-                    if (nodes) nodes.forEach(node => table.add(node));                
-                })
-
-                if (count == 0 || table.count() - count > 0) {
-                    queries(table.closest(target, 20)).then(next);
-                } else {
-                    resolve(table);
-                }
-                
-            };
-            queries(DHT.BOOTSTRAP_NODES).then(next);
-        })
-    }
-
 }
-
-
-let spider = new DHT();
-let target = Buffer.from('90289fd34dfc1cf8f316a268add8354c85334458', 'hex');
-
-spider.metadata(target).then(metadata => {
-    console.log(metadata);
-})
 
 function decodePeers (buf) {
   var peers = []
