@@ -10,7 +10,6 @@ import * as ut_metadata from 'ut_metadata';
 import * as parseTorrent from 'parse-torrent';
 
 import Queue from './priority-queue';
-//90289fd34dfc1cf8f316a268add8354c85334458
 
 export interface Message {
     t: Buffer,

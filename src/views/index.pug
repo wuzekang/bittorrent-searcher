@@ -1,0 +1,98 @@
+doctype html
+html
+  head
+    style.
+      body {
+        margin: 0px;
+        
+        font-size: 12.5px;
+        font-family: monospace;
+      }
+      .container {
+        width: 960px;
+        margin: 0px auto;
+      }
+      .search {
+        background-color: #ddd;
+        padding: 10px;
+        border-bottom: 1px solid #000;
+        margin-bottom: 10px;
+      }
+
+      .torrent:hover {
+        border-left-color: #0b2f3d;
+        background-color: #f0f0f0;
+      }
+      .torrent {
+        background-color: #eee;
+        border-left: 2px solid #a4b3cd;
+        border-bottom: 1px solid #fff;
+        padding: 10px;
+      }
+
+      .pager {
+        display: inline-block;
+        margin-top: 10px;
+        margin-bottom: 10px;
+      }
+      .pager > .item {
+        color: #000;
+        text-decoration: none;
+        display: inline-block;
+        padding: 10px;
+        border: 1px solid #ccc;
+      }
+
+      .pager > .item:hover {
+        border-top-color: #0b2f3d;
+        border-bottom-color: #0b2f3d;
+      }
+      .pager > .item.active {
+        background-color: #0b2f3d;
+        color: #a4b3cd;
+        border-top-color: #0b2f3d;
+        border-bottom-color: #0b2f3d;
+      }
+
+      .pager > .item + .item {
+        border-left: none;
+      }
+      .footer {
+        padding:10px;
+        background-color: #0b2f3d;
+        color: #a4b3cd;
+      }
+  body
+    .search
+      .container
+        form(action='/', style={ 'margin-bottom': '0px' })
+          b(style={ 'margin-right': '10px' }) [BTS]
+          input(name='search', style={ 'margin-right': '10px' })
+          button Search
+    
+    .container
+      each torrent in torrents
+        .torrent
+          b
+            |> 
+            a(href=`magnet:?xt=urn:btih:${torrent.infoHash}`, target='_blank') #{torrent.name}
+
+          table(style={'margin-left': '20px'})
+            each file in torrent.files
+              tr
+                td * #{file.name}
+
+    .container(style={ 'text-align': 'right' })
+      .pager
+        - if (pager.current > 1)
+          a.item(href=`?search=${search}&page=${pager.current - 1}&limit=${limit}`) &lt;
+        - for(var i = pager.begin; i <= pager.end; ++ i)
+          a.item(class={active: i == pager.current}, href=`?search=${search}&page=${i}&limit=${limit}`) #{i}
+        - if (pager.current < pager.total)
+          a.item(href=`?search=${search}&page=${pager.current + 1}&limit=${limit}`) &gt;
+    
+    .footer
+      .container
+        span Made with &hearts; in WIT
+        
+    //- script!= `console.log(${JSON.stringify(torrents)});`
